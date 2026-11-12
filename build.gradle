@@ -1,0 +1,174 @@
+
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'org.wyx6669036'
+version = '1.0-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+    // accounts.json 的 LastUsed 是 LocalDateTime，Jackson 默认不认 Java 8 时间类型
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.18.2'
+    implementation 'org.apache.commons:commons-compress:1.27.1'
+    // commons-compress 的 7z 解压走 LZMA/LZMA2 编码器，缺 xz 会在解包时抛 NoClassDefFoundError
+    implementation 'org.tukaani:xz:1.10'
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.79'
+    implementation 'net.java.dev.jna:jna:5.15.0'
+    implementation 'net.java.dev.jna:jna-platform:5.15.0'
+}
+
+application {
+    mainClass = 'org.wyx6669036.wtfnel.cli.Main'
+}
+
+// 运行期产物不要打进 jar；原生产物（两个 DLL + 替身）反过来要塞进去，
+// 这样单独一个 jar 丢到任意目录就能跑，NativeAssets 会按需释放到程序目录。
+tasks.named('jar') {
+    dependsOn 'nativeBuild'
+    exclude 'logs/**', 'shadow.json', 'cache/**', 'payloads/**'
+    from(layout.buildDirectory.dir('native')) {
+        include '*.dll', 'WPFLauncher.exe'
+        into 'native'
+    }
+    manifest {
+        attributes 'Main-Class': 'org.wyx6669036.wtfnel.cli.Main'
+    }
+}
+
+// 单文件分发包：把依赖一起打进去，方便直接丢进别的 Java 程序（插件/服务端）里用。
+// 用 gradle installDist 则是标准的 <dist>/bin + <dist>/lib 布局。
+tasks.register('fatJar', Jar) {
+    group = 'build'
+    description = '把所有依赖打进一个可执行 jar（含 Main-Class），供宿主程序直接引用'
+    archiveClassifier = 'all'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes 'Main-Class': 'org.wyx6669036.wtfnel.cli.Main'
+    }
+    dependsOn 'nativeBuild'
+    from sourceSets.main.output
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    // jar 内 /native/{WPFLauncher.exe, *.dll}：运行期 NativeAssets 会释放到程序目录
+    from(layout.buildDirectory.dir('native')) {
+        include '*.dll', 'WPFLauncher.exe'
+        into 'native'
+    }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/MANIFEST.MF'
+    exclude 'logs/**', 'shadow.json', 'cache/**', 'payloads/**'
+}
+
+// ---------------------------------------------------------------------------
+// 原生产物：注入用的两个 DLL + 启动器替身 WPFLauncher.exe
+//
+// 运行期对它们的位置是有硬要求的：
+//   - InjectionService 按 <程序目录>/payloads/*.dll 找 payload；
+//   - ParentedLauncher.ensureLauncher 按 <程序目录>/WPFLauncher.exe 找父进程替身。
+// 程序目录就是 jar 所在的目录，所以 build/libs 下面必须同时有这两样东西。
+// 用 MSVC + CMake（native/build.ps1）现编，不依赖仓库里提交的二进制。
+// 没有 C++ 工具链、只想打个 jar 的时候可以 -PskipNative 跳过。
+// ---------------------------------------------------------------------------
+def nativeSourceDir = layout.projectDirectory.dir('native')
+def nativeOutputDir = layout.buildDirectory.dir('native')
+
+tasks.register('nativeBuild', Exec) {
+    group = 'build'
+    description = '用 MSVC + CMake 编译 native/ 下的 payload DLL 和 WPFLauncher.exe 替身'
+    onlyIf {
+        if (project.hasProperty('skipNative')) {
+            logger.lifecycle('[native] -PskipNative，跳过原生构建')
+            return false
+        }
+        return true
+    }
+    workingDir = nativeSourceDir.asFile
+    commandLine 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            '-File', nativeSourceDir.file('build.ps1').asFile.absolutePath,
+            '-Configuration', 'Release',
+            '-BuildDir', nativeOutputDir.get().asFile.absolutePath
+    inputs.files(fileTree(nativeSourceDir) {
+        include '**/*.c', '**/*.cpp', '**/*.h', '**/*.hpp', '**/*.rc', '**/CMakeLists.txt', '**/*.ps1'
+        exclude 'build/**', 'prebuilt/**'
+    }).withPropertyName('nativeSources')
+    outputs.dir(nativeOutputDir)
+}
+
+// 两个 payload DLL -> build/libs/payloads（用 Sync，换名字/删文件时不留旧产物）
+tasks.register('nativePayloads', Sync) {
+    group = 'build'
+    description = '把 native 编出来的 payload DLL 放到 build/libs/payloads'
+    dependsOn tasks.named('nativeBuild')
+    onlyIf { !project.hasProperty('skipNative') }
+    from(nativeOutputDir) {
+        include '*.dll'
+    }
+    into layout.buildDirectory.dir('libs/payloads')
+}
+
+// 启动器替身 -> build/libs（FileName 必须是 WPFLauncher.exe，LauncherIdentity 按名字校验版本资源）
+tasks.register('nativeLauncher', Copy) {
+    group = 'build'
+    description = '把 native 编出来的 WPFLauncher.exe 替身放到 build/libs'
+    dependsOn tasks.named('nativeBuild')
+    onlyIf { !project.hasProperty('skipNative') }
+    from(nativeOutputDir) {
+        include 'WPFLauncher.exe'
+    }
+    into layout.buildDirectory.dir('libs')
+}
+
+// build/libs 同时也是 jar 的输出目录，Gradle 9 的校验会认为 nativeLauncher 和
+// 分发包任务（distZip/distTar/startScripts/installDist）抢同一个目录，必须显式排个序。
+tasks.matching { it.name in ['distZip', 'distTar', 'startScripts', 'installDist'] }.configureEach {
+    mustRunAfter tasks.named('nativeLauncher')
+}
+
+// 只有第三方依赖、不含本项目 class 的 jar：宿主想自己管 classpath 时，把它和瘦 jar
+// 一起丢进 libs/ 就行；也可以和 -all.jar 里挑一个用，两者别同时上 classpath。
+tasks.register('libsJar', Jar) {
+    group = 'build'
+    description = '只打第三方依赖（不含本项目 class），配合 WTFNelJava-<version>.jar 使用'
+    archiveClassifier = 'libs'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/MANIFEST.MF'
+}
+
+// gradlew build 一条命令走完：编译 + 三个 jar + 原生产物就位
+tasks.named('build') {
+    dependsOn tasks.named('jar'), tasks.named('libsJar'), tasks.named('fatJar'),
+            tasks.named('nativePayloads'), tasks.named('nativeLauncher')
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-Xlint:-serial'
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    systemProperty 'file.encoding', 'UTF-8'
+    testLogging {
+        events 'passed', 'failed', 'skipped'
+        exceptionFormat 'full'
+    }
+}
+
+tasks.withType(JavaExec).configureEach {
+    systemProperty 'file.encoding', 'UTF-8'
+}

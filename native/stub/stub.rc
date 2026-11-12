@@ -1,0 +1,41 @@
+#pragma code_page(65001)
+// WPFLauncher 替身的版本资源。
+//
+// LauncherIdentity.isAligned 检查四项，全部对上才会跳过运行期的 patchBinary：
+//   CompanyName      == NetEase
+//   ProductName      == 我的世界启动器
+//   OriginalFilename == WPFLauncher.exe
+//   FileVersion      == 补丁表最新版本（默认 1.15.34.21425）
+// 块里的键要和 LauncherIdentity.buildBlob 写的保持一致，否则 patchBinary 会因为
+// 「版本资源槽不足」失败（槽大小是 rc 生成时就定死的）。
+
+#include <windows.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,15,34,21425
+ PRODUCTVERSION 1,15,34,21425
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "NetEase"
+            VALUE "FileDescription", "我的世界启动器"
+            VALUE "FileVersion", "1.15.34.21425"
+            VALUE "InternalName", "WPFLauncher.exe"
+            VALUE "LegalCopyright", "Copyright © NetEase"
+            VALUE "OriginalFilename", "WPFLauncher.exe"
+            VALUE "ProductName", "我的世界启动器"
+            VALUE "ProductVersion", "1.15.34.21425"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END
